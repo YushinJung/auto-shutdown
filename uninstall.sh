@@ -26,6 +26,16 @@ systemctl daemon-reload
 rm -f /usr/local/sbin/auto-shutdown.sh
 echo "    서비스/타이머/스크립트 제거 완료."
 
+# --with-ssh-keepalive 로 설치했을 때 만든 drop-in 정리(있으면).
+KEEPALIVE_DROPIN=/etc/ssh/sshd_config.d/60-auto-shutdown-keepalive.conf
+if [ -f "$KEEPALIVE_DROPIN" ]; then
+    rm -f "$KEEPALIVE_DROPIN"
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    echo "    SSH keepalive drop-in 제거."
+elif grep -qE '^ClientAliveInterval 60' /etc/ssh/sshd_config 2>/dev/null; then
+    echo "    참고: /etc/ssh/sshd_config 에 넣은 ClientAlive 설정은 그대로 둡니다(수동 제거 가능)."
+fi
+
 if [ "$PURGE" = true ]; then
     rm -rf /etc/auto-shutdown
     rm -rf /var/lib/auto-shutdown

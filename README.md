@@ -16,6 +16,16 @@ sudo ./install.sh
 
 설치되면 systemd 타이머가 **부팅 5분 후부터 1분마다** 유휴 여부를 검사합니다.
 
+### 옵션: `--with-ssh-keepalive` (권장)
+
+```bash
+sudo ./install.sh --with-ssh-keepalive
+```
+
+SSH 접속을 유휴 판단 신호로 쓰는데, 기본 sshd 설정은 **죽은 연결(노트북 절전·와이파이 끊김 등)을 약 2시간 동안 ESTABLISHED로 붙들고** 있습니다. 그 동안 "접속 중"으로 오판돼 종료가 안 됩니다. 이 옵션은 sshd에 `ClientAliveInterval 60` / `ClientAliveCountMax 3` 을 설정해 **죽은 연결이 약 3분 내에 자동 정리**되게 만듭니다(기존 연결은 유지, 설정 문법 검증 후 reload). `sshd_config.d/` 를 쓰는 시스템에서는 drop-in 파일로 관리되어 제거도 깔끔합니다.
+
+> 참고: VS Code Remote-SSH나 Claude Code 원격 세션은 창/세션이 열려 있는 한 SSH 연결을 유지합니다. 이건 정상 동작이며, 세션을 정상 종료하면 연결도 닫힙니다. keepalive는 "정상 종료가 아닌" 유령 연결을 빠르게 정리하는 안전장치입니다.
+
 > ⚠ **EC2 shutdown behavior 확인 필수**
 > 이 도구는 인스턴스 내부에서 `shutdown -h now`를 실행합니다.
 > - `stop` (기본값) → 인스턴스 **중지**(EBS 유지, 비용 절감) ✅
