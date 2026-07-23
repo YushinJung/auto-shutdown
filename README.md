@@ -5,6 +5,7 @@ EC2 인스턴스가 **일정 시간(기본 30분) 동안 아무도 쓰지 않으
 - **순수 bash + systemd** — 외부 패키지 의존성 0. 어떤 EC2(Ubuntu/Amazon Linux 등)에서도 동작.
 - **오탐 방지 우선** — SSH 세션·감시 포트·CPU·디스크/네트워크 I/O 중 **하나라도** 활동이 있으면 종료를 미룹니다. CPU가 낮아도 I/O로 돌아가는 NGS 잡·대용량 다운로드는 보호됩니다.
 - **git clone → `sudo ./install.sh`** 한 번으로 다른 인스턴스에도 그대로 적용.
+- **`--with-ssh-keepalive` 옵션** — 죽은 SSH 연결이 오래 남아 종료를 막는 문제를 방지 (아래 [설치](#옵션-with-ssh-keepalive-권장) 참고).
 
 ## 설치
 
@@ -125,5 +126,5 @@ sudo ./uninstall.sh --purge    # 설정·상태·로그까지 전부 삭제
 cd /opt
 git clone https://github.com/YushinJung/auto-shutdown.git
 cd auto-shutdown
-./install.sh
+./install.sh --with-ssh-keepalive
 ```
