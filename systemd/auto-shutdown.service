@@ -1,0 +1,9 @@
+[Unit]
+Description=EC2 idle auto-shutdown check
+Documentation=https://github.com/YushinJung/auto-shutdown
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/auto-shutdown.sh
+# 종료를 실제로 실행하므로 root 필요(shutdown, 상태/로그 파일 쓰기).
+User=root

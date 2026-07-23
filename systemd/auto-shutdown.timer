@@ -1,0 +1,14 @@
+[Unit]
+Description=Run EC2 idle auto-shutdown check periodically
+Documentation=https://github.com/YushinJung/auto-shutdown
+
+[Timer]
+# 부팅 후 5분 유예(사용자가 접속할 시간을 준다).
+OnBootSec=5min
+# 이후 1분마다 반복.
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=auto-shutdown.service
+
+[Install]
+WantedBy=timers.target
