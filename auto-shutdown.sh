@@ -19,6 +19,10 @@ IDLE_MINUTES=30
 CPU_THRESHOLD=5
 CHECK_INTERVAL=3
 WATCH_PORTS="8888"
+# 한 줄에 패턴 하나. 매칭되는 프로세스가 있으면 사용 중(check_watch_processes 참고).
+WATCH_PROCESSES=""
+# 매칭 프로세스가 이 시간(시)보다 오래 돌았으면 예외에서 뺀다. 0 이면 상한 없음.
+WATCH_PROCESS_MAX_HOURS=3
 CHECK_DISK_IO=true
 DISK_IO_THRESHOLD_KBPS=200
 CHECK_NET_IO=true
@@ -114,6 +118,43 @@ check_watch_ports() {
             return 0
         fi
     done
+    return 1
+}
+
+# WATCH_PROCESSES 의 패턴(한 줄에 하나, pgrep -f 확장 정규식) 중 하나라도 명령줄에
+# 매칭되는 프로세스가 있으면 사용 중. CPU/I/O 를 거의 안 쓰는 대기 구간(다른
+# 인스턴스의 작업 완료를 기다리는 파이프라인 등)을 지키기 위한 것.
+# 패턴에 공백을 넣을 수 있도록 공백이 아니라 줄 단위로 나눈다. 앞뒤 공백은 무시하고,
+# 빈 줄과 # 으로 시작하는 줄은 건너뛴다.
+# WATCH_PROCESS_MAX_HOURS(>0)보다 오래 실행된 프로세스(ps etimes 기준)는 멈춘 것으로
+# 보고 예외에서 뺀다. 이때는 다른 신호(CPU/I/O 등)로만 판단한다.
+# 주의: -f 는 명령줄 전체를 보므로 `vim .../main.py` 처럼 파일을 열어만 둬도 매칭된다.
+check_watch_processes() {
+    local pat pid etimes fresh expired max_secs
+    max_secs=$(( ${WATCH_PROCESS_MAX_HOURS:-0} * 3600 ))
+    while IFS= read -r pat; do
+        pat="${pat#"${pat%%[![:space:]]*}"}"
+        pat="${pat%"${pat##*[![:space:]]}"}"
+        case "$pat" in ''|'#'*) continue ;; esac
+        fresh=""
+        expired=""
+        for pid in $(pgrep -f -- "$pat" 2>/dev/null); do
+            etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+            [ -n "$etimes" ] || continue   # 그새 끝난 프로세스
+            if [ "$max_secs" -gt 0 ] && [ "$etimes" -gt "$max_secs" ]; then
+                expired="${expired:+$expired,}${pid}"
+            else
+                fresh="${fresh:+$fresh,}${pid}"
+            fi
+        done
+        if [ -n "$fresh" ]; then
+            echo "process:${pat}(pid=${fresh})"
+            return 0
+        fi
+        # 상한을 넘긴 프로세스만 남았다 → 예외에서 뺀다(CPU/I/O 로만 판단). 멈춘
+        # 작업이 인스턴스를 무한정 켜두는 것을 막기 위함. 매 검사마다 경고를 남긴다.
+        [ -n "$expired" ] && log "WARN  process:${pat}(pid=${expired}) 실행 ${WATCH_PROCESS_MAX_HOURS}h 초과 → 예외 해제"
+    done <<< "$WATCH_PROCESSES"
     return 1
 }
 
@@ -221,6 +262,9 @@ main() {
     reason=$(check_keepalive)
     if [ -z "$reason" ]; then
         reason=$(check_watch_ports)
+    fi
+    if [ -z "$reason" ]; then
+        reason=$(check_watch_processes)
     fi
     if [ -z "$reason" ] && [ "$SESSION_BLOCKS_SHUTDOWN" = true ]; then
         if [ "$session_count" -gt 0 ]; then

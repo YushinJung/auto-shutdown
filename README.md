@@ -43,6 +43,7 @@ SSH 접속을 유휴 판단 신호로 쓰는데, 기본 sshd 설정은 **죽은 
 | 신호 | 감지 방법 | 종료를 막는가 |
 |------|-----------|---------------|
 | 감시 포트 (Jupyter 등) | `ss` established, `WATCH_PORTS` | 예 |
+| 감시 프로세스 (파이프라인 등) | `pgrep -f`, `WATCH_PROCESSES` | 예 |
 | CPU 사용률 | `/proc/stat` 델타 > `CPU_THRESHOLD`% | 예 |
 | 디스크 I/O | `/proc/diskstats` 델타 > 임계 | 예 |
 | 네트워크 I/O | `/proc/net/dev` 델타 > 임계 | 예 |
@@ -91,10 +92,30 @@ CPU/디스크/네트워크는 세션 유무와 무관하게 **매 검사마다**
 | `IDLE_MINUTES` | `30` | 이 시간 동안 계속 유휴면 종료 |
 | `CPU_THRESHOLD` | `5` | CPU 사용률(%) 이하를 유휴로 간주 |
 | `WATCH_PORTS` | `"8888"` | 공백 구분. 비우면 포트 검사 안 함 |
+| `WATCH_PROCESSES` | `""` | **줄 단위**로 `pgrep -f` 패턴을 적음. 매칭되는 프로세스가 있으면 종료 안 함. 비우면 검사 안 함 |
+| `WATCH_PROCESS_MAX_HOURS` | `3` | 감시 프로세스가 이 시간보다 오래 돌았으면 예외에서 뺌. `0`이면 상한 없음 |
 | `CHECK_DISK_IO` / `DISK_IO_THRESHOLD_KBPS` | `true` / `200` | 디스크 I/O 감지 |
 | `CHECK_NET_IO` / `NET_IO_THRESHOLD_KBPS` | `true` / `200` | 네트워크 I/O 감지 |
 | `SESSION_BLOCKS_SHUTDOWN` | `true` | 접속한 사람이 있으면 CPU가 낮아도 종료 안 함. `false`면 접속 무시하고 CPU/I/O로만 판단 |
 | `DRY_RUN` | `false` | `true`면 실제 종료 대신 로그만 |
+
+### 프로세스 예외 (`WATCH_PROCESSES`)
+
+다른 인스턴스의 작업이 끝나길 기다리는 파이프라인처럼, **오래 돌지만 대기 구간엔 CPU/I/O를 거의 안 쓰는** 작업은 detached tmux 안에서 돌리면 유휴로 판정되어 꺼집니다. 이런 작업은 명령줄 패턴을 등록해 보호합니다.
+
+```bash
+# /etc/auto-shutdown/config.env
+WATCH_PROCESSES="
+ATG_PIP-seq_QC/src/main.py
+other_pipeline/run.sh
+"
+```
+
+- 한 줄에 패턴 하나(`pgrep -f` 확장 정규식, 공백 포함 가능). 빈 줄과 `#` 주석 줄은 무시합니다.
+- 매칭되면 로그에 `BUSY reason=process:<패턴>(pid=...)` 로 남습니다.
+- 패턴은 경로까지 넣어 **좁게** 쓰세요. `main.py` 만 쓰면 무관한 프로세스까지 잡힙니다. 등록 전에 `pgrep -af '<패턴>'` 으로 무엇이 잡히는지 확인하세요.
+- 명령줄 전체를 보므로 `vim .../main.py` 처럼 파일을 열어두기만 해도 매칭됩니다.
+- 멈춘 작업이 인스턴스를 무한정 켜두지 않도록 `WATCH_PROCESS_MAX_HOURS`(기본 `3`)보다 오래 실행된 프로세스는 예외에서 뺍니다. 실행 시간은 `ps etimes`(대기 시간 포함)로 재고, 초과하면 로그에 `WARN process:... 초과 → 예외 해제`가 남습니다. 그 뒤엔 CPU/I/O로만 판단하므로 **3시간 넘게 걸리는 파이프라인이면 값을 늘리세요**(`0` = 상한 없음).
 
 ## 로그 확인
 
