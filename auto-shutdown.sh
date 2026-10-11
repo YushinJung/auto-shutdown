@@ -301,6 +301,15 @@ main() {
     case "$last_active" in
         ''|*[!0-9]*) last_active=$t_now; echo "$last_active" > "$STATE_FILE" ;;
     esac
+    # 상태파일은 /var/lib 에 있어 재부팅 후에도 남는다. 이전 부팅에서 기록된 값이면
+    # 부팅 시각부터 다시 센다. 안 그러면 부팅 직후 첫 검사(OnBootSec=5min)에서
+    # idle_for=1568m 처럼 계산돼 켜자마자 꺼진다.
+    local t_boot
+    t_boot=$(boot_time)
+    if [ "$last_active" -lt "$t_boot" ]; then
+        last_active=$t_boot
+        echo "$last_active" > "$STATE_FILE"
+    fi
 
     idle_secs=$((t_now - last_active))
     [ "$idle_secs" -lt 0 ] && idle_secs=0
