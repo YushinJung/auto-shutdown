@@ -27,11 +27,23 @@ CHECK_DISK_IO=true
 DISK_IO_THRESHOLD_KBPS=200
 CHECK_NET_IO=true
 NET_IO_THRESHOLD_KBPS=200
-# true(기본) 면 실제 로그인 세션/SSH 연결이 있는 것만으로도 종료를 막는다.
+# 실제 로그인 세션(pty 가 붙은 `who` 항목)이 있는 것만으로도 종료를 막을지.
 #   여기서 '실제'는 detached tmux/screen 을 제외한 값이다(count_login_sessions 주석 참고).
-# false 면 세션은 로그에만 남기고, CPU/디스크/네트워크가 낮으면 접속 중이어도 종료한다.
-SESSION_BLOCKS_SHUTDOWN=true
+#   false(기본) 면 세션은 로그에만 남기고, CPU/디스크/네트워크가 낮으면 접속 중이어도
+#   종료한다. 터미널 창을 열어둔 채 자리를 비우면 `who` 에 계속 남아서, true 면
+#   영영 안 꺼지는 원인이 된다. 터미널 작업은 하트비트로 보호한다(config.env 참고).
+SESSION_BLOCKS_SHUTDOWN=false
+# pty 없는 SSH 연결(포트 22 established)만으로 종료를 막을지.
+#   false(기본) 면 막지 않는다. Claude Code / VS Code Remote-SSH 같은 에이전트는
+#   `sshd: user@notty` 로 상시 붙어 있어서, 이걸 true 로 두면 영영 안 꺼진다.
+#   사람이 붙어 있는지는 하트비트(HEARTBEAT_FILES)가 담당한다.
+SSH_BLOCKS_SHUTDOWN=false
 KEEPALIVE_FILE=/var/lib/auto-shutdown/keepalive
+# 하트비트 파일(공백 구분, 글롭 허용). mtime 이 HEARTBEAT_MAX_AGE_MINUTES 안이면 사용 중.
+# root 가 아닌 사용자/훅이 touch 할 수 있는 경로여야 한다.
+HEARTBEAT_FILES="/home/*/.cache/auto-shutdown/heartbeat"
+# 0 이면 하트비트 검사를 하지 않는다. IDLE_MINUTES 에 더해지므로 30+30 = 약 60분.
+HEARTBEAT_MAX_AGE_MINUTES=30
 DRY_RUN=false
 LOG_FILE=/var/log/auto-shutdown.log
 MAX_LOG_BYTES=5242880
@@ -73,6 +85,33 @@ boot_time() { awk '/^btime/ {print $2}' /proc/stat; }
 check_keepalive() {
     if [ -n "$KEEPALIVE_FILE" ] && [ -e "$KEEPALIVE_FILE" ]; then
         echo "keepalive_file"
+        return 0
+    fi
+    return 1
+}
+
+# 하트비트 파일들 중 가장 최근 mtime(epoch). 하나도 없으면 0.
+#
+# $HEARTBEAT_FILES 를 의도적으로 따옴표 없이 쓴다: 공백으로 쪼개고 글롭을 확장해야
+# /home/*/... 패턴이 동작한다. 매칭이 없으면 패턴 문자열 그대로 남고 -f 에서 걸러진다.
+# 값이 빈 문자열이면 루프는 한 번도 돌지 않는다.
+_heartbeat_mtime() {
+    local newest=0 f m
+    for f in $HEARTBEAT_FILES; do
+        [ -f "$f" ] || continue
+        m=$(stat -c%Y "$f" 2>/dev/null) || continue
+        case "$m" in ''|*[!0-9]*) continue ;; esac
+        [ "$m" -gt "$newest" ] && newest=$m
+    done
+    echo "$newest"
+}
+
+# HEARTBEAT_AGE_MIN(전역)이 TTL 안이면 사용 중. -1 은 하트비트 파일이 없다는 뜻.
+check_heartbeat() {
+    [ "${HEARTBEAT_MAX_AGE_MINUTES:-0}" -gt 0 ] || return 1
+    [ "$HEARTBEAT_AGE_MIN" -ge 0 ] || return 1
+    if [ "$HEARTBEAT_AGE_MIN" -lt "$HEARTBEAT_MAX_AGE_MINUTES" ]; then
+        echo "heartbeat(${HEARTBEAT_AGE_MIN}m<${HEARTBEAT_MAX_AGE_MINUTES}m)"
         return 0
     fi
     return 1
@@ -258,29 +297,43 @@ main() {
     # 세션이 있어도 자원 사용이 실제로 낮으면 idle 판정에 반영하기 위해.
     measure_resources
 
+    local t_now
+    t_now=$(now)
+
+    # 하트비트 나이(분). 파일이 하나도 없으면 -1.
+    local hb_mtime hb_label
+    hb_mtime=$(_heartbeat_mtime)
+    HEARTBEAT_AGE_MIN=-1
+    hb_label="-"
+    if [ "$hb_mtime" -gt 0 ]; then
+        HEARTBEAT_AGE_MIN=$(( (t_now - hb_mtime) / 60 ))
+        # 시계 역행/미래 mtime 방어.
+        [ "$HEARTBEAT_AGE_MIN" -lt 0 ] && HEARTBEAT_AGE_MIN=0
+        hb_label="${HEARTBEAT_AGE_MIN}m"
+    fi
+
     local reason=""
     reason=$(check_keepalive)
+    if [ -z "$reason" ]; then
+        reason=$(check_heartbeat)
+    fi
     if [ -z "$reason" ]; then
         reason=$(check_watch_ports)
     fi
     if [ -z "$reason" ]; then
         reason=$(check_watch_processes)
     fi
-    if [ -z "$reason" ] && [ "$SESSION_BLOCKS_SHUTDOWN" = true ]; then
-        if [ "$session_count" -gt 0 ]; then
-            reason="login_session(${session_count}users)"
-        elif [ "$ssh_count" -gt 0 ]; then
-            reason="ssh_conn(${ssh_count})"
-        fi
+    if [ -z "$reason" ] && [ "$SESSION_BLOCKS_SHUTDOWN" = true ] && [ "$session_count" -gt 0 ]; then
+        reason="login_session(${session_count}users)"
+    fi
+    if [ -z "$reason" ] && [ "$SSH_BLOCKS_SHUTDOWN" = true ] && [ "$ssh_count" -gt 0 ]; then
+        reason="ssh_conn(${ssh_count})"
     fi
     if [ -z "$reason" ]; then
         reason="$USAGE_REASON"
     fi
 
-    local t_now
-    t_now=$(now)
-
-    local ctx="cpu=${LAST_CPU_USAGE}% disk=${LAST_DISK_KBPS}KB/s net=${LAST_NET_KBPS}KB/s sessions=${session_count} mux=${mux_count} ssh=${ssh_count}"
+    local ctx="cpu=${LAST_CPU_USAGE}% disk=${LAST_DISK_KBPS}KB/s net=${LAST_NET_KBPS}KB/s sessions=${session_count} mux=${mux_count} ssh=${ssh_count} hb=${hb_label}"
 
     if [ -n "$reason" ]; then
         # 사용 중 → 마지막 활동 시각 갱신, 종료 안 함.

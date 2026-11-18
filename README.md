@@ -3,8 +3,9 @@
 EC2 인스턴스가 **일정 시간(기본 30분) 동안 아무도 쓰지 않으면 스스로 종료(stop)**되게 하는 작은 도구입니다. 파이프라인을 쓰고 인스턴스를 끄지 않아 새는 비용을 막습니다.
 
 - **순수 bash + systemd** — 외부 패키지 의존성 0. 어떤 EC2(Ubuntu/Amazon Linux 등)에서도 동작.
-- **오탐 방지 우선** — SSH 접속·감시 포트·CPU·디스크/네트워크 I/O 중 **하나라도** 활동이 있으면 종료를 미룹니다. CPU가 낮아도 I/O로 돌아가는 NGS 잡·대용량 다운로드는 보호됩니다.
+- **오탐 방지 우선** — 하트비트·감시 포트·CPU·디스크/네트워크 I/O 중 **하나라도** 활동이 있으면 종료를 미룹니다. CPU가 낮아도 I/O로 돌아가는 NGS 잡·대용량 다운로드는 보호됩니다.
 - **유령 세션은 무시** — detached `tmux`/`screen` 은 아무도 접속 안 해도 `who`에 영원히 남아 종료를 막습니다. 이 항목은 걸러냅니다 ([자세히](#동작-방식)).
+- **에이전트 상시 SSH 연결도 무시** — Claude Code 같은 pty 없는 SSH 연결은 작업이 없어도 계속 붙어 있습니다. 기본값(`SSH_BLOCKS_SHUTDOWN=false`)은 이걸 종료 근거로 쓰지 않고, 대신 **하트비트 파일**로 실제 활동을 봅니다 ([자세히](#하트비트-활동-기반-보호)).
 - **git clone → `sudo ./install.sh`** 한 번으로 다른 인스턴스에도 그대로 적용.
 - **`--with-ssh-keepalive` 옵션** — 죽은 SSH 연결이 오래 남아 종료를 막는 문제를 방지 (아래 [설치](#옵션-with-ssh-keepalive-권장) 참고).
 
@@ -24,9 +25,9 @@ sudo ./install.sh
 sudo ./install.sh --with-ssh-keepalive
 ```
 
-SSH 접속을 유휴 판단 신호로 쓰는데, 기본 sshd 설정은 **죽은 연결(노트북 절전·와이파이 끊김 등)을 약 2시간 동안 ESTABLISHED로 붙들고** 있습니다. 그 동안 "접속 중"으로 오판돼 종료가 안 됩니다. 이 옵션은 sshd에 `ClientAliveInterval 60` / `ClientAliveCountMax 3` 을 설정해 **죽은 연결이 약 3분 내에 자동 정리**되게 만듭니다(기존 연결은 유지, 설정 문법 검증 후 reload). `sshd_config.d/` 를 쓰는 시스템에서는 drop-in 파일로 관리되어 제거도 깔끔합니다.
+기본 sshd 설정은 **죽은 연결(노트북 절전·와이파이 끊김 등)을 약 2시간 동안 ESTABLISHED로 붙들고** 있고, 그 연결의 로그인 세션도 `who` 에 남아 있습니다. 그 동안 "접속 중"으로 오판돼 종료가 안 됩니다. 이 옵션은 sshd에 `ClientAliveInterval 60` / `ClientAliveCountMax 3` 을 설정해 **죽은 연결이 약 3분 내에 자동 정리**되게 만듭니다(기존 연결은 유지, 설정 문법 검증 후 reload). `sshd_config.d/` 를 쓰는 시스템에서는 drop-in 파일로 관리되어 제거도 깔끔합니다.
 
-> 참고: VS Code Remote-SSH나 Claude Code 원격 세션은 창/세션이 열려 있는 한 SSH 연결을 유지합니다. 이건 정상 동작이며, 세션을 정상 종료하면 연결도 닫힙니다. keepalive는 "정상 종료가 아닌" 유령 연결을 빠르게 정리하는 안전장치입니다.
+> 참고: VS Code Remote-SSH나 Claude Code 원격 세션은 창/세션이 열려 있는 한 SSH 연결을 유지합니다. 이 연결 자체는 기본값(`SSH_BLOCKS_SHUTDOWN=false`)에서 종료를 막지 않습니다 — keepalive가 정리해주는 건 죽은 연결에 딸린 **로그인 세션**(`who` 항목)쪽입니다.
 
 > ⚠ **EC2 shutdown behavior 확인 필수**
 > 이 도구는 인스턴스 내부에서 `shutdown -h now`를 실행합니다.
@@ -48,8 +49,9 @@ SSH 접속을 유휴 판단 신호로 쓰는데, 기본 sshd 설정은 **죽은 
 | 디스크 I/O | `/proc/diskstats` 델타 > 임계 | 예 |
 | 네트워크 I/O | `/proc/net/dev` 델타 > 임계 | 예 |
 | 수동 keepalive | `keepalive` 파일 존재 | 예 |
-| 로그인 세션 | `who` (**detached tmux/screen 제외**) | 예 (`SESSION_BLOCKS_SHUTDOWN=false` 면 아니오) |
-| SSH 연결 (VS Code Remote 포함) | `ss` established, 포트 22 | 예 (`SESSION_BLOCKS_SHUTDOWN=false` 면 아니오) |
+| 하트비트 | `HEARTBEAT_FILES` mtime < `HEARTBEAT_MAX_AGE_MINUTES` | 예 |
+| 로그인 세션 | `who` (**detached tmux/screen 제외**) | **아니오** (기본값 `SESSION_BLOCKS_SHUTDOWN=false`; `true` 면 예) |
+| SSH 연결 (VS Code Remote·Claude Code 포함) | `ss` established, 포트 22 | **아니오** (기본값 `SSH_BLOCKS_SHUTDOWN=false`; `true` 면 예) |
 | detached tmux/screen | `who` 호스트 필드 | **아니오** (로그에 `mux=N` 으로만 표시) |
 
 CPU/디스크/네트워크는 세션 유무와 무관하게 **매 검사마다** 측정하고 로그에 남깁니다.
@@ -72,15 +74,79 @@ CPU/디스크/네트워크는 세션 유무와 무관하게 **매 검사마다**
 
 | 상황 | 판정 |
 |------|------|
-| SSH로 사람이 접속해 있음 | CPU가 0%여도 **안 꺼짐** |
+| 터미널 창만 열어두고 자리를 비움 (`who` 에 잡힘) | 하트비트가 만료되고 CPU/I/O가 낮으면 **꺼짐** |
+| 터미널에서 실제로 명령을 치고 있음 | `PROMPT_COMMAND` 하트비트가 신선해서 **안 꺼짐** |
+| Claude Code 등 pty 없는 SSH만 붙어 있음 | 하트비트가 만료되고 CPU/I/O가 낮으면 **꺼짐** |
+| 그 에이전트가 실제로 작업 중 | 하트비트가 신선해서 **안 꺼짐** |
 | detached tmux만 남아 있고 아무도 접속 안 함 | CPU/디스크/네트워크가 낮으면 **꺼짐** |
 | detached tmux 안에서 잡이 실제로 돌고 있음 | CPU/디스크/네트워크에 걸려 **안 꺼짐** |
 
-> ⚠ 접속만 해두고 자리를 비우면(VS Code·Claude Code 창을 켜둔 채 퇴근 등) `ss` 에 연결이 남아 안 꺼집니다. 이게 싫으면 `SESSION_BLOCKS_SHUTDOWN=false` 로 바꾸세요 — 접속 여부를 무시하고 CPU/I/O만으로 판단합니다.
+## 하트비트 (활동 기반 보호)
+
+> **CPU만으로는 "쓰고 있는가"를 알 수 없어서 (실제로 겪은 문제)**
+> Claude Code 같은 에이전트는 pty를 받지 않는 `sshd: user@notty` 로 접속해서 `who` 에 안 보이고, 작업이 없어도 연결을 끊지 않습니다. 2주치 로그 8281줄 중 **3556줄이 `reason=ssh_conn`** 이었고, 그 사이 idle 타이머는 매분 리셋돼 인스턴스가 영영 안 꺼졌습니다.
+>
+> ```
+> 10:33:22 BUSY reason=ssh_conn(4) cpu=0% disk=0KB/s net=6KB/s sessions=0 mux=0 ssh=4
+> ```
+>
+> 그래서 SSH 연결은 종료 근거에서 빼고(`SSH_BLOCKS_SHUTDOWN=false`), 대신 활동 자체를 신호로 씁니다. 추론은 원격에서 돌고 이 박스는 파일 읽기/grep 만 하므로 CPU는 평상시 0~2% 라, CPU 임계값으로는 작업 중인 에이전트를 지킬 수 없습니다.
+
+`KEEPALIVE_FILE` 은 "있으면 영구 보호"인 수동 스위치입니다. 하트비트는 "최근에 touch 됐으면 보호"로, 끄는 걸 잊어도 TTL이 지나면 자동으로 풀립니다.
+
+```bash
+mkdir -p ~/.cache/auto-shutdown && touch ~/.cache/auto-shutdown/heartbeat
+```
+
+기본 경로는 `/home/*/.cache/auto-shutdown/heartbeat` (글롭)이고 TTL은 30분입니다. root가 아닌 사용자도 쓸 수 있는 경로이므로 passwordless sudo 없이 훅에서 touch 할 수 있습니다.
+
+> **TTL은 `IDLE_MINUTES` 에 더해집니다.** TTL 안에 있는 동안은 매 검사가 "사용 중"으로 판정해 마지막 활동 시각을 갱신하므로, 마지막 touch 로부터 실제 종료까지는 `HEARTBEAT_MAX_AGE_MINUTES + IDLE_MINUTES` 입니다.
+>
+> 기본값 `30 + 30 = 약 60분`. Claude의 프롬프트 캐시가 1시간 유지되므로, **그 안에 돌아오면 캐시가 살아 있는 상태로 이어서 작업할 수 있도록** 맞춘 값입니다. `IDLE_MINUTES` 를 바꾸면 이 합도 같이 바뀌니, 1시간을 유지하려면 두 값의 합을 60으로 두세요. 더 빨리 끄려면 TTL을 줄이면 됩니다 — 검사 간격이 1분이라 3~5분으로도 동작합니다.
+
+### 터미널 작업도 하트비트로 (필수)
+
+`SESSION_BLOCKS_SHUTDOWN` 의 기본값이 `false` 이므로, **터미널로 접속해 있다는 사실만으로는 종료를 막지 못합니다.** `who` 를 신호로 쓰면 터미널 창을 열어둔 채 자리를 비울 때 영영 안 꺼집니다 — 실측으로 로그 8281줄 중 3216줄이 `reason=login_session` 이었고, **10시간 연속**(`sessions=4`) 안 꺼진 밤이 있었습니다.
+
+대신 아래를 걸면 "창만 열어둔 상태"와 "실제로 쓰는 상태"가 구분됩니다. 명령을 칠 때마다 touch 되고, 마지막 명령으로부터 약 60분 뒤에 꺼집니다.
+
+```bash
+# ~/.bashrc
+PROMPT_COMMAND="mkdir -p \"\$HOME/.cache/auto-shutdown\" && touch \"\$HOME/.cache/auto-shutdown/heartbeat\"${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+```
+
+(기존 `PROMPT_COMMAND` 가 있으면 뒤에 이어 붙입니다. 없으면 그냥 단독으로 동작합니다.)
+
+### Claude Code 훅으로 자동 touch
+
+`~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "async": true,
+        "command": "mkdir -p \"$HOME/.cache/auto-shutdown\" && touch \"$HOME/.cache/auto-shutdown/heartbeat\"" }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "async": true,
+        "command": "mkdir -p \"$HOME/.cache/auto-shutdown\" && touch \"$HOME/.cache/auto-shutdown/heartbeat\"" }] }
+    ],
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "async": true,
+        "command": "mkdir -p \"$HOME/.cache/auto-shutdown\" && touch \"$HOME/.cache/auto-shutdown/heartbeat\"" }] }
+    ]
+  }
+}
+```
+
+`PostToolUse` 가 있어야 프롬프트 한 번으로 오래 도는 에이전트 실행도 보호됩니다. `async: true` 라 턴을 지연시키지 않습니다.
+
+> 로그의 `hb=` 필드로 상태를 볼 수 있습니다: `hb=-` 는 하트비트 파일 없음, `hb=3m` 은 3분 전 touch.
 
 > RAM은 종료 판단에 쓰지 않습니다. 유휴 상태에서도 캐시/상주 프로세스로 높게 유지되어 영영 종료가 안 되는 문제를 막기 위함입니다.
 
-> ⚠ CPU는 코어 전체 평균입니다(8 vCPU에서 1코어 20% 사용 = 전체 2.5%). 대용량 다운로드처럼 CPU는 거의 안 쓰고 네트워크/디스크만 쓰는 작업은 `CPU_THRESHOLD`로 못 잡습니다 — 이런 작업은 `NET_IO_THRESHOLD_KBPS`/`DISK_IO_THRESHOLD_KBPS`가 지켜주므로 값을 너무 높게 잡지 마세요. 반대로 CPU를 거의 안 쓰는 사람의 작업(로그 읽기, 코드 리뷰 등)은 이 도구 입장에서 유휴와 구분이 안 되니, 오래 그렇게 있을 예정이면 `touch keepalive`로 수동 보호하세요.
+> ⚠ CPU는 코어 전체 평균입니다(8 vCPU에서 1코어 20% 사용 = 전체 2.5%). 대용량 다운로드처럼 CPU는 거의 안 쓰고 네트워크/디스크만 쓰는 작업은 `CPU_THRESHOLD`로 못 잡습니다 — 이런 작업은 `NET_IO_THRESHOLD_KBPS`/`DISK_IO_THRESHOLD_KBPS`가 지켜주므로 값을 너무 높게 잡지 마세요. 반대로 CPU를 거의 안 쓰는 사람의 작업(로그 읽기, 코드 리뷰 등)은 이 도구 입장에서 유휴와 구분이 안 되니, [하트비트](#하트비트-활동-기반-보호)를 걸거나 오래 그렇게 있을 예정이면 `touch keepalive`로 수동 보호하세요.
 
 ## 설정
 
@@ -96,7 +162,10 @@ CPU/디스크/네트워크는 세션 유무와 무관하게 **매 검사마다**
 | `WATCH_PROCESS_MAX_HOURS` | `3` | 감시 프로세스가 이 시간보다 오래 돌았으면 예외에서 뺌. `0`이면 상한 없음 |
 | `CHECK_DISK_IO` / `DISK_IO_THRESHOLD_KBPS` | `true` / `200` | 디스크 I/O 감지 |
 | `CHECK_NET_IO` / `NET_IO_THRESHOLD_KBPS` | `true` / `200` | 네트워크 I/O 감지 |
-| `SESSION_BLOCKS_SHUTDOWN` | `true` | 접속한 사람이 있으면 CPU가 낮아도 종료 안 함. `false`면 접속 무시하고 CPU/I/O로만 판단 |
+| `SESSION_BLOCKS_SHUTDOWN` | `false` | `true` 면 `who` 에 로그인 세션이 있으면 CPU가 낮아도 종료 안 함. 창만 열어둔 채 자리를 비우면 안 꺼지므로 기본값은 `false` 이고, 터미널 작업은 하트비트로 보호 |
+| `SSH_BLOCKS_SHUTDOWN` | `false` | pty 없는 SSH 연결(포트 22)만으로 종료를 막을지. `true` 면 Claude Code 연결이 있는 동안 영영 안 꺼짐 |
+| `HEARTBEAT_FILES` | `"/home/*/.cache/auto-shutdown/heartbeat"` | 하트비트 파일 목록(공백 구분, 글롭 가능). 가장 최근 mtime 하나만 봄 |
+| `HEARTBEAT_MAX_AGE_MINUTES` | `30` | 하트비트 유효 시간(분). `IDLE_MINUTES` 에 더해짐(30+30=약 60분). `0` 이면 하트비트 검사 끔 |
 | `DRY_RUN` | `false` | `true`면 실제 종료 대신 로그만 |
 
 ### 프로세스 예외 (`WATCH_PROCESSES`)
@@ -137,7 +206,8 @@ tail -f /var/log/auto-shutdown.log
 | `cpu=` `disk=` `net=` | 매 검사마다 실측한 값. 세션 유무와 무관하게 항상 기록 |
 | `sessions=` | **실제** 로그인 수 (detached tmux/screen 제외) |
 | `mux=` | 제외된 tmux/screen 항목 수. `sessions=0 mux=1` = 유령 세션만 있음 |
-| `ssh=` | 포트 22 established 연결 수. pty 없는 접속(VS Code·Claude Code)은 `who`에 안 잡히므로 이 필드로만 보입니다 |
+| `ssh=` | 포트 22 established 연결 수. pty 없는 접속(VS Code·Claude Code)은 `who`에 안 잡히므로 이 필드로만 보입니다. 기본값에서는 **종료를 막지 않고 진단용으로만** 기록됩니다 |
+| `hb=` | 하트비트 나이. `-` 는 파일 없음, `3m` 은 3분 전 touch |
 
 위 예시에서 `mux=1`은 끝까지 유지되지만(tmux가 살아 있음) 종료를 막지 않습니다. 14:20에 `ssh=1 → 0` 으로 바뀌며 사람이 나간 시점이 드러납니다.
 
@@ -168,9 +238,24 @@ sudo systemctl start auto-shutdown.timer
 
 1. `/etc/auto-shutdown/config.env` 에서 `DRY_RUN=true`, `IDLE_MINUTES=2` 로 설정.
 2. 접속을 끊고 부하 없이 2분 두기 → 로그에 `WOULD SHUTDOWN` 이 찍히는지 확인.
-3. SSH 접속 / Jupyter 포트 연결 / CPU 부하(`yes >/dev/null &`) / `touch keepalive` 를 각각 걸어보고 → `BUSY reason=...` 로 타이머가 리셋되는지 확인.
-4. **tmux 필터 확인** — `tmux new -s test` 로 세션을 만들고 detach(`Ctrl-b d`) 한 뒤 로그를 보면 `mux=1` 이 뜨지만 `sessions=` 는 늘지 않아야 합니다. `who` 는 이때 1 user 를 보고합니다(정상 — 걸러진 것).
-5. 확인되면 `DRY_RUN=false`, `IDLE_MINUTES=30` 으로 되돌리기.
+3. Jupyter 포트 연결 / CPU 부하(`yes >/dev/null &`) / `touch keepalive` 를 각각 걸어보고 → `BUSY reason=...` 로 타이머가 리셋되는지 확인. (터미널 접속 자체는 기본값에서 타이머를 리셋하지 않습니다 — 아래 하트비트가 그 역할입니다.)
+4. **하트비트 확인** — `touch ~/.cache/auto-shutdown/heartbeat` 후 `BUSY reason=heartbeat(0m<30m)` 이 찍히는지, `touch -d "40 minutes ago"` 로 만료시키면 다시 `IDLE` 로 돌아가는지 확인.
+5. **tmux 필터 확인** — `tmux new -s test` 로 세션을 만들고 detach(`Ctrl-b d`) 한 뒤 로그를 보면 `mux=1` 이 뜨지만 `sessions=` 는 늘지 않아야 합니다. `who` 는 이때 1 user 를 보고합니다(정상 — 걸러진 것).
+6. 확인되면 `DRY_RUN=false`, `IDLE_MINUTES=30` 으로 되돌리기.
+
+## 기존 설치 업그레이드
+
+`install.sh` 는 이미 있는 `/etc/auto-shutdown/config.env` 를 **덮어쓰지 않습니다.** 두 가지를 직접 챙겨야 합니다.
+
+**새 항목은 안 생깁니다.** 재설치만 하면 `SSH_BLOCKS_SHUTDOWN`, `HEARTBEAT_*` 가 설정 파일에 없습니다 — 스크립트 내장 기본값이 적용되므로 동작은 바뀌지만, 파일을 보고 설정을 확인할 수는 없습니다. 주석과 함께 명시하려면 새 `config.env` 의 해당 블록을 직접 복사해 넣으세요.
+
+**바뀐 기본값은 적용되지 않습니다.** `SESSION_BLOCKS_SHUTDOWN` 의 기본값이 `true` → `false` 로 바뀌었지만, 기존 설정 파일에 `=true` 가 적혀 있으면 그 값이 계속 이깁니다. 바꾸려면:
+
+```bash
+sudo sed -i 's/^SESSION_BLOCKS_SHUTDOWN=.*/SESSION_BLOCKS_SHUTDOWN=false/' /etc/auto-shutdown/config.env
+```
+
+재시작은 필요 없습니다(다음 검사부터 반영). **먼저 `~/.bashrc` 하트비트를 걸어두세요** — 이걸 바꾸면 터미널 접속만으로는 더 이상 보호되지 않습니다.
 
 ## 제거
 

@@ -8,8 +8,9 @@
 #
 # 옵션:
 #   --with-ssh-keepalive  sshd 에 ClientAlive 설정을 넣어, 죽은 SSH 연결(노트북
-#                         절전/네트워크 끊김 등)이 약 3분 내에 자동 정리되게 한다.
-#                         SSH 접속 기반 유휴 감지를 신뢰성 있게 만든다.
+#                         절전/네트워크 끊김 등)과 그에 딸린 로그인 세션이 약 3분
+#                         내에 자동 정리되게 한다. 로그의 sessions=/ssh= 진단값을
+#                         정확하게 유지한다.
 #
 # 비대화형(예: EC2 user-data)에서도 그대로 호출 가능하다.
 
@@ -60,7 +61,7 @@ configure_ssh_keepalive() {
     if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config 2>/dev/null \
        && [ -d "$dropin_dir" ]; then
         cat > "$dropin" <<'EOF'
-# auto-shutdown: 죽은 SSH 연결을 빠르게 정리해 유휴 감지를 정확하게 유지.
+# auto-shutdown: 죽은 SSH 연결과 그 로그인 세션을 빠르게 정리해 유휴 감지를 정확하게 유지.
 # 서버가 60초마다 클라이언트 생존을 확인하고, 3회(약 3분) 응답 없으면 연결을 끊는다.
 ClientAliveInterval 60
 ClientAliveCountMax 3
