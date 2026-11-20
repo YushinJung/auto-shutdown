@@ -7,7 +7,8 @@ EC2 인스턴스가 **일정 시간(기본 30분) 동안 아무도 쓰지 않으
 - **유령 세션은 무시** — detached `tmux`/`screen` 은 아무도 접속 안 해도 `who`에 영원히 남아 종료를 막습니다. 이 항목은 걸러냅니다 ([자세히](#동작-방식)).
 - **에이전트 상시 SSH 연결도 무시** — Claude Code 같은 pty 없는 SSH 연결은 작업이 없어도 계속 붙어 있습니다. 기본값(`SSH_BLOCKS_SHUTDOWN=false`)은 이걸 종료 근거로 쓰지 않고, 대신 **하트비트 파일**로 실제 활동을 봅니다 ([자세히](#하트비트-활동-기반-보호)).
 - **git clone → `sudo ./install.sh`** 한 번으로 다른 인스턴스에도 그대로 적용.
-- **`--with-ssh-keepalive` 옵션** — 죽은 SSH 연결이 오래 남아 종료를 막는 문제를 방지 (아래 [설치](#옵션-with-ssh-keepalive-권장) 참고).
+- **`--with-ssh-keepalive` 옵션** — 죽은 SSH 연결이 오래 남아 종료를 막는 문제를 방지 (아래 [설치](#옵션---with-ssh-keepalive-권장) 참고).
+- **`--with-global-heartbeat` 옵션** — 계정이 여러 개인 서버에서 모든 사용자의 로그인 셸에 하트비트를 한 번에 적용 (아래 [다중 사용자 서버](#계정이-여러-개인-서버-전역-설치) 참고).
 
 ## 설치
 
@@ -36,6 +37,16 @@ sudo ./install.sh --with-ssh-keepalive
 >
 > 콘솔: EC2 > 인스턴스 > 작업 > 인스턴스 설정 > 종료 동작 변경 → **중지(stop)**
 > 설치 스크립트도 마지막에 이 경고를 출력합니다.
+
+### 옵션: `--with-global-heartbeat` (계정이 여러 개면 권장)
+
+```bash
+sudo ./install.sh --with-global-heartbeat
+```
+
+`/etc/profile.d/auto-shutdown-heartbeat.sh` 를 설치해, **모든 사용자**의 대화형 **로그인** 셸이 프롬프트마다 자기 홈에 하트비트를 남기게 합니다. 계정마다 `~/.bashrc` 를 손댈 필요가 없고, 나중에 추가되는 계정도 자동으로 적용됩니다. 자세한 배경과 적용 범위는 [다중 사용자 서버](#계정이-여러-개인-서버-전역-설치)를 보세요.
+
+`uninstall.sh` 가 이 파일도 함께 제거합니다.
 
 ## 동작 방식
 
@@ -104,7 +115,7 @@ mkdir -p ~/.cache/auto-shutdown && touch ~/.cache/auto-shutdown/heartbeat
 >
 > 기본값 `30 + 30 = 약 60분`. Claude의 프롬프트 캐시가 1시간 유지되므로, **그 안에 돌아오면 캐시가 살아 있는 상태로 이어서 작업할 수 있도록** 맞춘 값입니다. `IDLE_MINUTES` 를 바꾸면 이 합도 같이 바뀌니, 1시간을 유지하려면 두 값의 합을 60으로 두세요. 더 빨리 끄려면 TTL을 줄이면 됩니다 — 검사 간격이 1분이라 3~5분으로도 동작합니다.
 
-### 터미널 작업도 하트비트로 (필수)
+### 터미널 작업도 하트비트로 (필수, 계정별)
 
 `SESSION_BLOCKS_SHUTDOWN` 의 기본값이 `false` 이므로, **터미널로 접속해 있다는 사실만으로는 종료를 막지 못합니다.** `who` 를 신호로 쓰면 터미널 창을 열어둔 채 자리를 비울 때 영영 안 꺼집니다 — 실측으로 로그 8281줄 중 3216줄이 `reason=login_session` 이었고, **10시간 연속**(`sessions=4`) 안 꺼진 밤이 있었습니다.
 
@@ -116,6 +127,37 @@ PROMPT_COMMAND="mkdir -p \"\$HOME/.cache/auto-shutdown\" && touch \"\$HOME/.cach
 ```
 
 (기존 `PROMPT_COMMAND` 가 있으면 뒤에 이어 붙입니다. 없으면 그냥 단독으로 동작합니다.)
+
+### 계정이 여러 개인 서버 (전역 설치)
+
+> ⚠ **계정 하나라도 빠뜨리면 그 사용자의 저부하 작업이 조용히 종료됩니다.**
+> `SESSION_BLOCKS_SHUTDOWN=false` 에서 터미널 접속은 보호 근거가 아니므로, 위 `~/.bashrc` 설정이 없는 계정은 `who` 에 보여도 보호되지 않습니다. 실제로 겪은 상황: 한 인스턴스에서 한 계정에만 설정을 걸었는데, 최근 로그인 횟수는 오히려 설정이 없는 다른 계정이 52회 대 26회로 더 많았습니다. 그 계정의 2시간대 터미널 세션은 CPU/IO 가 낮으면 약 60분 뒤에 종료됩니다.
+>
+> 한동안 사고가 안 나서 더 위험합니다 — `HEARTBEAT_FILES` 글롭이 `/home/*` 에서 **가장 최근 mtime 하나**만 보기 때문에, 설정을 건 사람이 활동하는 동안은 박스 전체가 살아 있습니다. 그 사람이 조용해지는 순간 드러납니다.
+
+설치할 때 옵션 하나로 전체 계정에 적용합니다.
+
+```bash
+sudo ./install.sh --with-global-heartbeat
+```
+
+`/etc/profile.d/auto-shutdown-heartbeat.sh` 가 깔리고, 모든 사용자의 대화형 로그인 셸이 프롬프트마다 자기 홈(`~/.cache/auto-shutdown/heartbeat`)에 touch 합니다. 나중에 추가되는 계정도 자동으로 커버됩니다.
+
+- 계정별 `~/.bashrc` 설정과 **같이 둬도 안전합니다.** 마커(`__auto_shutdown_hb`)를 공유하고 로그인 셸이 `/etc/profile` → `~/.bashrc` 순서로 읽으므로, `PROMPT_COMMAND` 에 중복으로 들어가지 않습니다.
+- 대화형이 아닐 때는 아무것도 하지 않습니다. `profile.d` 는 `sh` 로도 읽히므로 `case "$-" in *i*)` 로 감쌌습니다.
+- **이미 열려 있는 셸에는 적용되지 않습니다.** 재접속하거나 `source /etc/profile.d/auto-shutdown-heartbeat.sh` 하세요.
+- **비로그인 대화형 셸은 적용되지 않습니다.** `/etc/profile` 은 로그인 셸만 읽습니다. SSH 접속(`sshd` 가 띄우는 셸)은 로그인 셸이라 괜찮지만, 그 안에서 다시 띄운 `bash`, `screen` 윈도우 등은 커버되지 않습니다. VS Code 통합 터미널은 설정에 따라 다릅니다. 그런 셸까지 확실히 하려면 계정별 `~/.bashrc` 설정을 함께 두세요 — 마커가 같아서 중복되지 않습니다.
+- 홈 디렉터리 권한이 `700` 이어도 괜찮습니다 — 검사 스크립트는 `User=root` 로 돌아 다른 계정의 하트비트를 읽습니다.
+
+확인:
+
+```bash
+# 새 세션을 하나 열고
+echo "$PROMPT_COMMAND"              # __auto_shutdown_hb 가 보여야 함
+ls -la ~/.cache/auto-shutdown/      # heartbeat 파일 mtime 확인
+```
+
+> 비대화형 셸(`ssh host 'cmd'`, 스크립트, **Claude Code 의 Bash 툴**)은 프롬프트를 그리지 않으므로 이 경로로 보호되지 않습니다. 에이전트 작업은 아래 훅이 담당합니다.
 
 ### Claude Code 훅으로 자동 touch
 
@@ -255,7 +297,13 @@ sudo systemctl start auto-shutdown.timer
 sudo sed -i 's/^SESSION_BLOCKS_SHUTDOWN=.*/SESSION_BLOCKS_SHUTDOWN=false/' /etc/auto-shutdown/config.env
 ```
 
-재시작은 필요 없습니다(다음 검사부터 반영). **먼저 `~/.bashrc` 하트비트를 걸어두세요** — 이걸 바꾸면 터미널 접속만으로는 더 이상 보호되지 않습니다.
+재시작은 필요 없습니다(다음 검사부터 반영). **먼저 하트비트를 걸어두세요** — 이걸 바꾸면 터미널 접속만으로는 더 이상 보호되지 않습니다. 계정이 여러 개면 `~/.bashrc` 를 계정마다 손대는 대신 전역 설치가 안전합니다:
+
+```bash
+sudo ./install.sh --with-global-heartbeat
+```
+
+기존 설치에 이 옵션만 추가로 적용해도 됩니다(스크립트/유닛은 다시 깔리고 `config.env` 는 그대로 보존됩니다).
 
 ## 제거
 
@@ -263,6 +311,8 @@ sudo sed -i 's/^SESSION_BLOCKS_SHUTDOWN=.*/SESSION_BLOCKS_SHUTDOWN=false/' /etc/
 sudo ./uninstall.sh            # 서비스만 제거(설정·로그 보존)
 sudo ./uninstall.sh --purge    # 설정·상태·로그까지 전부 삭제
 ```
+
+`--with-global-heartbeat` 로 깔린 `/etc/profile.d/auto-shutdown-heartbeat.sh` 와 `--with-ssh-keepalive` drop-in 은 둘 다 함께 제거됩니다. 계정별로 직접 넣은 `~/.bashrc` 설정과 `~/.cache/auto-shutdown` 은 건드리지 않으므로 필요하면 수동으로 지우세요.
 
 ## EC2 user-data 로 자동 설치(선택)
 
@@ -273,5 +323,7 @@ sudo ./uninstall.sh --purge    # 설정·상태·로그까지 전부 삭제
 cd /opt
 git clone https://github.com/YushinJung/auto-shutdown.git
 cd auto-shutdown
-./install.sh --with-ssh-keepalive
+./install.sh --with-ssh-keepalive --with-global-heartbeat
 ```
+
+(계정이 하나뿐이면 `--with-global-heartbeat` 는 생략해도 됩니다. 단 그 계정의 `~/.bashrc` 나 에이전트 훅 중 하나는 반드시 하트비트를 남겨야 합니다.)

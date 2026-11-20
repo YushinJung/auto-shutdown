@@ -4,13 +4,25 @@
 #
 # 사용법:
 #   git clone <repo> && cd auto-shutdown
-#   sudo ./install.sh [--with-ssh-keepalive]
+#   sudo ./install.sh [--with-ssh-keepalive] [--with-global-heartbeat]
 #
 # 옵션:
 #   --with-ssh-keepalive  sshd 에 ClientAlive 설정을 넣어, 죽은 SSH 연결(노트북
 #                         절전/네트워크 끊김 등)과 그에 딸린 로그인 세션이 약 3분
 #                         내에 자동 정리되게 한다. 로그의 sessions=/ssh= 진단값을
 #                         정확하게 유지한다.
+#
+#   --with-global-heartbeat
+#                         /etc/profile.d 에 하트비트 스니펫을 설치해, 모든 사용자의
+#                         대화형 '로그인' 셸이 명령을 칠 때마다 자기 홈에 하트비트를
+#                         남기게 한다. SESSION_BLOCKS_SHUTDOWN=false 에서는 터미널
+#                         접속 자체가 보호 근거가 아니므로, 계정이 여러 개인 서버라면
+#                         이걸 쓰는 편이 안전하다(계정별 ~/.bashrc 설정을 빠뜨리면
+#                         그 사용자의 저부하 작업이 보호되지 않는다).
+#                         SSH 접속은 로그인 셸이라 적용되지만, 비로그인 대화형
+#                         셸(중첩 bash, screen 윈도우 등)은 /etc/profile 을 읽지
+#                         않으므로 적용되지 않는다 — 그쪽까지 필요하면 계정별
+#                         ~/.bashrc 설정을 함께 쓸 것.
 #
 # 비대화형(예: EC2 user-data)에서도 그대로 호출 가능하다.
 
@@ -24,14 +36,17 @@ CONFIG_DIR=/etc/auto-shutdown
 CONFIG_DST="$CONFIG_DIR/config.env"
 STATE_DIR=/var/lib/auto-shutdown
 SYSTEMD_DIR=/etc/systemd/system
+PROFILED_DST=/etc/profile.d/auto-shutdown-heartbeat.sh
 
 # ---- 옵션 파싱 --------------------------------------------------------------
 WITH_SSH_KEEPALIVE=false
+WITH_GLOBAL_HEARTBEAT=false
 for arg in "$@"; do
     case "$arg" in
         --with-ssh-keepalive) WITH_SSH_KEEPALIVE=true ;;
+        --with-global-heartbeat) WITH_GLOBAL_HEARTBEAT=true ;;
         -h|--help)
-            sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "알 수 없는 옵션: $arg" >&2; exit 1 ;;
     esac
@@ -92,6 +107,53 @@ EOF
     fi
 }
 
+# ---- 전역 하트비트 설치 헬퍼 ------------------------------------------------
+# /etc/profile.d 에 스니펫을 깔아, 모든 사용자의 대화형 로그인 셸이 프롬프트마다
+# 자기 홈에 하트비트를 남기게 한다. /etc/profile 은 로그인 셸만 읽으므로 SSH 접속은
+# 커버되지만 비로그인 대화형 셸(중첩 bash 등)은 커버되지 않는다.
+#
+# 대화형이 아닐 때는 함수 정의조차 하지 않는다: profile.d 는 bash 뿐 아니라 sh
+# 로도 읽히고, 비대화형 셸에는 프롬프트가 없어 PROMPT_COMMAND 가 무의미하다.
+# 마커 이름(__auto_shutdown_hb)을 사용자별 ~/.bashrc 설정과 공유하므로, 둘을
+# 같이 두어도 PROMPT_COMMAND 에 중복으로 들어가지 않는다(로그인 셸은
+# /etc/profile -> ~/.bashrc 순서로 읽는다).
+configure_global_heartbeat() {
+    cat > "$PROFILED_DST" <<'HBEOF'
+# auto-shutdown 하트비트 — 모든 사용자의 대화형 셸에 적용.
+#
+# SESSION_BLOCKS_SHUTDOWN=false 이므로 `who` 에 잡히는 것만으로는 보호되지 않는다.
+# 프롬프트가 뜰 때마다(=명령을 칠 때마다) touch 해서, 창만 열어둔 상태와 실제로
+# 쓰는 상태를 구분한다. 사용자별 ~/.bashrc 설정과 같은 마커를 쓰므로 중복되지 않는다.
+case "$-" in
+    *i*)
+        __auto_shutdown_hb() {
+            mkdir -p "$HOME/.cache/auto-shutdown" 2>/dev/null \
+                && touch "$HOME/.cache/auto-shutdown/heartbeat" 2>/dev/null
+            return 0
+        }
+        case "${PROMPT_COMMAND-}" in
+            *__auto_shutdown_hb*) ;;
+            *) PROMPT_COMMAND="__auto_shutdown_hb${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+        esac
+        ;;
+esac
+HBEOF
+    chmod 0644 "$PROFILED_DST"
+
+    # 문법 검증: sh 로도 읽히므로 양쪽 다 본다.
+    local ok=true
+    bash -n "$PROFILED_DST" 2>/dev/null || ok=false
+    sh   -n "$PROFILED_DST" 2>/dev/null || ok=false
+    if [ "$ok" != true ]; then
+        echo "    ⚠ 전역 하트비트: 문법 검증 실패 — $PROFILED_DST 제거함." >&2
+        rm -f "$PROFILED_DST"
+        return 1
+    fi
+
+    echo "    전역 하트비트: $PROFILED_DST 설치"
+    echo "                   (이미 열려 있는 셸은 재접속 또는 'source $PROFILED_DST' 필요)"
+}
+
 echo "==> auto-shutdown 설치 중..."
 
 # 1) 감지 스크립트 배치
@@ -125,6 +187,11 @@ if [ "$WITH_SSH_KEEPALIVE" = true ]; then
     configure_ssh_keepalive || true
 fi
 
+# 7) (옵션) 전역 하트비트
+if [ "$WITH_GLOBAL_HEARTBEAT" = true ]; then
+    configure_global_heartbeat || true
+fi
+
 echo
 echo "==> 설치 완료."
 echo "    상태 확인:   systemctl status auto-shutdown.timer"
@@ -133,7 +200,7 @@ echo "    로그 확인:   tail -f /var/log/auto-shutdown.log"
 echo "    설정 변경:   sudo nano $CONFIG_DST   (다음 검사부터 자동 반영)"
 echo "    종료 임시중단: sudo touch $STATE_DIR/keepalive"
 
-# 6) EC2 shutdown behavior 경고
+# 8) EC2 shutdown behavior 경고
 cat <<'WARN'
 
 ────────────────────────────────────────────────────────────────────────
